@@ -1,0 +1,195 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TheVilsBet - Bolão Copa 2026</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="main-header">
+      <div class="logo-area">
+        <span class="logo-glow">🪙 TheVilsBet</span>
+        <span class="logo-sub">Copa 2026</span>
+      </div>
+      <div id="user-status" class="user-status-bar">
+        <!-- Preenchido pelo JS -->
+      </div>
+    </header>
+
+    <!-- Tela de Login / Cadastro -->
+    <section id="auth-screen" class="auth-card">
+      <div class="auth-header">
+        <h2>Bem-vindo ao Bolão Familiar!</h2>
+        <p>Faça palpites nos jogos da fase de grupos e ganhe Moedas TheVils (🪙).</p>
+      </div>
+      
+      <div class="auth-tabs">
+        <button id="tab-btn-login" class="auth-tab-btn active" onclick="switchAuthTab('login')">Entrar</button>
+        <button id="tab-btn-register" class="auth-tab-btn" onclick="switchAuthTab('register')">Cadastrar</button>
+      </div>
+
+      <form id="auth-form" onsubmit="handleAuth(event)">
+        <div class="form-group">
+          <label for="auth-username">Nome Completo / Apelido</label>
+          <input type="text" id="auth-username" required placeholder="Ex: Primo André, Tio Vils...">
+        </div>
+        <div class="form-group">
+          <label for="auth-pin">PIN de Acesso (4 dígitos)</label>
+          <input type="password" id="auth-pin" required maxlength="4" pattern="\d{4}" placeholder="Ex: 1234">
+          <span class="input-helper">Usado para proteger seus palpites de alterações.</span>
+        </div>
+        <div id="auth-error" class="error-message hidden"></div>
+        <button type="submit" id="auth-submit-btn" class="btn btn-primary btn-block">Entrar</button>
+      </form>
+    </section>
+
+    <!-- Dashboard Principal -->
+    <main id="dashboard" class="main-content hidden">
+      <!-- Navegação por Abas -->
+      <nav class="nav-tabs">
+        <button class="tab-link active" onclick="openTab('tab-leaderboard')">🏆 Classificação</button>
+        <button class="tab-link" onclick="openTab('tab-matches')">⚽ Jogos e Palpites</button>
+        <button class="tab-link" onclick="openTab('tab-rules')">📜 Regras</button>
+        <button class="tab-link" onclick="openTab('tab-admin')">⚙️ Admin</button>
+      </nav>
+
+      <!-- Conteúdo das Abas -->
+      
+      <!-- ABA: CLASSIFICAÇÃO -->
+      <section id="tab-leaderboard" class="tab-content">
+        <div class="card">
+          <h2 class="card-title">Ranking da Família</h2>
+          <div class="table-container">
+            <table class="leaderboard-table">
+              <thead>
+                <tr>
+                  <th style="width: 80px;">Posição</th>
+                  <th>Participante</th>
+                  <th style="text-align: center;">Placar Exato</th>
+                  <th style="text-align: center;">Acerto Vencedor</th>
+                  <th style="text-align: right; color: var(--gold);">Pontuação</th>
+                </tr>
+              </thead>
+              <tbody id="leaderboard-body">
+                <!-- Inserido dinamicamente pelo JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ABA: JOGOS -->
+      <section id="tab-matches" class="tab-content hidden">
+        <div class="filters-card">
+          <div class="search-row">
+            <input type="text" id="match-search" placeholder="Pesquisar por time (ex: Brasil, México)..." oninput="filterMatches()">
+            <select id="match-filter-status" onchange="filterMatches()">
+              <option value="all">Todos os Jogos</option>
+              <option value="open">Apostas Abertas</option>
+              <option value="locked">Jogos Iniciados / Encerrados</option>
+              <option value="completed">Jogos com Resultados Finais</option>
+              <option value="my_bets">Meus Palpites Preenchidos</option>
+            </select>
+          </div>
+          
+          <div class="group-tabs-container">
+            <div class="group-tabs" id="group-filter-tabs">
+              <button class="group-tab-btn active" onclick="filterByGroup('all')">Todos</button>
+              <!-- Preenchido pelo JS (Grupos A-L) -->
+            </div>
+          </div>
+        </div>
+
+        <div id="matches-grid" class="matches-grid">
+          <!-- Inserido dinamicamente pelo JS -->
+        </div>
+      </section>
+
+      <!-- ABA: REGRAS -->
+      <section id="tab-rules" class="tab-content hidden">
+        <div class="card">
+          <h2 class="card-title">Regras do Bolão TheVilsBet</h2>
+          <div class="rules-content">
+            <h3>Como funciona a pontuação?</h3>
+            <div class="rules-grid">
+              <div class="rule-item exact">
+                <div class="rule-icon">🎯</div>
+                <div class="rule-details">
+                  <h4>Placar Exato (10 Moedas)</h4>
+                  <p>Você acerta a quantidade exata de gols de ambos os times.</p>
+                  <span class="badge badge-gold">10 Moedas TheVils (🪙)</span>
+                </div>
+              </div>
+              <div class="rule-item outcome">
+                <div class="rule-icon">⚖️</div>
+                <div class="rule-details">
+                  <h4>Acerto do Vencedor ou Empate (5 Moedas)</h4>
+                  <p>Você acerta quem ganha ou se dá empate, mas erra o placar.</p>
+                  <span class="badge badge-silver">5 Moedas TheVils (🪙)</span>
+                </div>
+              </div>
+              <div class="rule-item fail">
+                <div class="rule-icon">❌</div>
+                <div class="rule-details">
+                  <h4>Erro de Resultado (0 Moedas)</h4>
+                  <p>Você erra o vencedor e o empate da partida.</p>
+                  <span class="badge badge-red">0 Moedas TheVils (🪙)</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="rules-notes">
+              <h3>Observações Importantes:</h3>
+              <ul>
+                <li>As apostas de cada partida fecham automaticamente <strong>15 minutos antes</strong> do início oficial do jogo.</li>
+                <li>Você pode ver os palpites dos outros participantes assim que a aposta do respectivo jogo fechar.</li>
+                <li>Os resultados são sincronizados automaticamente a partir da tabela oficial na web de 5 em 5 minutos.</li>
+                <li>Compartilhe com sua família: basta estarem na mesma rede Wi-Fi e acessar o IP do computador servidor.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ABA: ADMIN -->
+      <section id="tab-admin" class="tab-content hidden">
+        <div class="card" id="admin-auth-card">
+          <h2 class="card-title">Acesso Administrativo</h2>
+          <form onsubmit="handleAdminAuth(event)">
+            <div class="form-group">
+              <label for="admin-pin-input">Senha Mestre do Admin</label>
+              <input type="password" id="admin-pin-input" required placeholder="Digite a senha mestre...">
+            </div>
+            <div id="admin-auth-error" class="error-message hidden"></div>
+            <button type="submit" class="btn btn-primary">Acessar Painel</button>
+          </form>
+        </div>
+
+        <div class="card hidden" id="admin-panel">
+          <h2 class="card-title">Painel de Controle Administrador</h2>
+          <div class="admin-actions">
+            <button onclick="syncMatchesWeb()" class="btn btn-secondary">🔄 Sincronizar Resultados da Web</button>
+            <span class="action-helper">Puxa automaticamente os resultados em tempo real do repositório da Copa de 2026.</span>
+          </div>
+          
+          <h3 class="admin-subtitle">Atualizar Jogos Manualmente</h3>
+          <div class="admin-search-row">
+            <input type="text" id="admin-match-search" placeholder="Pesquisar jogo para atualizar..." oninput="filterAdminMatches()">
+          </div>
+          <div class="admin-matches-list" id="admin-matches-list">
+            <!-- Inserido dinamicamente pelo JS -->
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  
+  <script src="app.js"></script>
+</body>
+</html>

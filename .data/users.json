@@ -1,0 +1,14 @@
+{
+  "Leo": {
+    "pin": "1234",
+    "predictions": {
+      "2": {
+        "score1": 2,
+        "score2": 2
+      }
+    },
+    "score": 0,
+    "exactScores": 0,
+    "outcomeScores": 0
+  }
+}
