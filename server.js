@@ -60,6 +60,8 @@ async function initDb() {
           exact_scores INT DEFAULT 0,
           outcome_scores INT DEFAULT 0
         );
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS exact_scores INT DEFAULT 0;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS outcome_scores INT DEFAULT 0;
       `);
       
       // Se matches estiver vazio no SQL, popular com dados do matches.json inicial
@@ -277,109 +279,138 @@ async function recalculateScores(matches, users) {
 
 // Sincronizar com web
 async function syncFromWeb() {
-  try {
-    const url = 'https://raw.githubusercontent.com/openfootball/worldcup/master/2026--usa/cup.txt';
-    const response = await fetch(url);
-    if (!response.ok) throw new Error('Falha ao buscar cup.txt do GitHub');
+  let content = '';
+  
+  // Se estiver usando banco de dados local (JSON), prefere o cup.txt local para facilitar testes locais
+  const isLocal = !usePostgres;
+  const localPath = path.join(__dirname, 'cup.txt');
+  
+  if (isLocal && fs.existsSync(localPath)) {
+    content = fs.readFileSync(localPath, 'utf8');
+    console.log('Sincronização: Usando arquivo cup.txt local (ambiente de desenvolvimento).');
+  } else {
+    const url = process.env.CUP_TEXT_URL || 'https://raw.githubusercontent.com/leovils/TheVilsBet/main/cup.txt';
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        content = await response.text();
+        console.log(`Sincronização: Dados do cup.txt carregados da web (${url}).`);
+      } else {
+        console.warn(`Sincronização: URL da web retornou status ${response.status}.`);
+      }
+    } catch (fetchError) {
+      console.warn('Sincronização: Erro ao buscar da web:', fetchError.message);
+    }
     
-    const content = await response.text();
-    const lines = content.split(/\r?\n/);
-    const matches = await dbGetMatches();
-    let updated = false;
+    // Fallback para arquivo local se a web falhar
+    if (!content && fs.existsSync(localPath)) {
+      content = fs.readFileSync(localPath, 'utf8');
+      console.log('Sincronização: Fallback para cup.txt local.');
+    }
+  }
 
-    const normalizeName = name => name.trim().toLowerCase()
-      .replace(/korea\s+republic|south\s+korea/g, 'korea republic')
-      .replace(/ir\s+iran|iran/g, 'ir iran')
-      .replace(/cote\s+d\'ivoire|ivory\s+coast/g, 'ivory coast')
-      .replace(/czechia|czech\s+republic/g, 'czechia');
+  if (!content) {
+    throw new Error('Não foi possível carregar os dados de cup.txt (web ou local).');
+  }
 
-    const localMatchMap = new Map();
-    matches.forEach(m => {
-      const key = `${normalizeName(m.team1)} v ${normalizeName(m.team2)}`;
-      localMatchMap.set(key, m);
-    });
+  const lines = content.split(/\r?\n/);
+  const matches = await dbGetMatches();
+  let updated = false;
 
-    let currentGroup = null;
-    let currentDate = null;
+  const normalizeName = name => name.trim().toLowerCase()
+    .replace(/korea\s+republic|south\s+korea/g, 'korea republic')
+    .replace(/ir\s+iran|iran/g, 'ir iran')
+    .replace(/cote\s+d\'ivoire|ivory\s+coast/g, 'ivory coast')
+    .replace(/czechia|czech\s+republic/g, 'czechia');
 
-    const groupRegex = /^[^a-zA-Z0-9\s]?\s*(Group\s+[A-L])/i;
-    const dateRegex = /^(Thu|Fri|Sat|Sun|Mon|Tue|Wed)\s+June\s+(\d+)/i;
+  const localMatchMap = new Map();
+  matches.forEach(m => {
+    const key = `${normalizeName(m.team1)} v ${normalizeName(m.team2)}`;
+    localMatchMap.set(key, m);
+  });
 
-    for (let line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
+  let currentGroup = null;
+  let currentDate = null;
 
-      const groupMatch = trimmed.match(groupRegex);
-      if (groupMatch) {
-        currentGroup = groupMatch[1];
-        continue;
-      }
+  const groupRegex = /^[^a-zA-Z0-9\s]?\s*(Group\s+[A-L])/i;
+  const dateRegex = /^(Thu|Fri|Sat|Sun|Mon|Tue|Wed)\s+June\s+(\d+)/i;
 
-      const dateMatch = trimmed.match(dateRegex);
-      if (dateMatch) {
-        const day = dateMatch[2].padStart(2, '0');
-        currentDate = `2026-06-${day}`;
-        continue;
-      }
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
 
-      if (trimmed.includes(' v ')) {
-        let parts = trimmed.split('@');
-        let matchPart = parts[0].trim();
-        
-        const scoreRegex = /^(.*)\s+(\d+)-(\d+)\s+(.*)$/;
-        const scoreMatch = matchPart.match(scoreRegex);
+    const groupMatch = trimmed.match(groupRegex);
+    if (groupMatch) {
+      currentGroup = groupMatch[1];
+      continue;
+    }
 
-        let team1 = '';
-        let team2 = '';
-        let s1 = null;
-        let s2 = null;
+    const dateMatch = trimmed.match(dateRegex);
+    if (dateMatch) {
+      const day = dateMatch[2].padStart(2, '0');
+      currentDate = `2026-06-${day}`;
+      continue;
+    }
 
-        if (scoreMatch) {
-          let t1Part = scoreMatch[1].trim();
+    if (trimmed.includes('@')) {
+      let parts = trimmed.split('@');
+      let matchPart = parts[0].trim();
+      
+      const scoreRegex = /^(.*)\s+(\d+)-(\d+)\s+(.*)$/;
+      const scoreMatch = matchPart.match(scoreRegex);
+
+      let team1 = '';
+      let team2 = '';
+      let s1 = null;
+      let s2 = null;
+
+      if (scoreMatch) {
+        let t1Part = scoreMatch[1].trim();
+        t1Part = t1Part.replace(/^\d{2}:\d{2}\s+UTC[+-]\d+\s+/, '').trim();
+        team1 = t1Part;
+        s1 = parseInt(scoreMatch[2], 10);
+        s2 = parseInt(scoreMatch[3], 10);
+        team2 = scoreMatch[4].trim();
+      } else {
+        const vSplit = matchPart.split(/\s+v\s+/);
+        if (vSplit.length === 2) {
+          let t1Part = vSplit[0].trim();
           t1Part = t1Part.replace(/^\d{2}:\d{2}\s+UTC[+-]\d+\s+/, '').trim();
           team1 = t1Part;
-          s1 = parseInt(scoreMatch[2], 10);
-          s2 = parseInt(scoreMatch[3], 10);
-          team2 = scoreMatch[4].trim();
-        } else {
-          const vSplit = matchPart.split(/\s+v\s+/);
-          if (vSplit.length === 2) {
-            let t1Part = vSplit[0].trim();
-            t1Part = t1Part.replace(/^\d{2}:\d{2}\s+UTC[+-]\d+\s+/, '').trim();
-            team1 = t1Part;
-            team2 = vSplit[1].trim();
-          }
+          team2 = vSplit[1].trim();
         }
+      }
 
-        if (team1 && team2) {
-          const key = `${normalizeName(team1)} v ${normalizeName(team2)}`;
-          const localMatch = localMatchMap.get(key);
-          if (localMatch) {
-            if (s1 !== null && s2 !== null) {
-              if (localMatch.score1 !== s1 || localMatch.score2 !== s2) {
-                localMatch.score1 = s1;
-                localMatch.score2 = s2;
-                localMatch.status = 'completed';
-                await dbUpdateMatch(localMatch.id, s1, s2, 'completed');
-                updated = true;
-              }
+      if (team1 && team2) {
+        const key = `${normalizeName(team1)} v ${normalizeName(team2)}`;
+        const localMatch = localMatchMap.get(key);
+        if (localMatch) {
+          if (s1 !== null && s2 !== null) {
+            if (localMatch.score1 !== s1 || localMatch.score2 !== s2) {
+              localMatch.score1 = s1;
+              localMatch.score2 = s2;
+              localMatch.status = 'completed';
+              await dbUpdateMatch(localMatch.id, s1, s2, 'completed');
+              updated = true;
             }
           }
         }
       }
     }
+  }
 
-    if (updated) {
-      const users = await dbGetUsers();
-      const freshMatches = await dbGetMatches();
-      await recalculateScores(freshMatches, users);
-      await dbSaveAllUsers(users);
-      console.log('Sincronização concluída: resultados atualizados.');
-    } else {
-      console.log('Sincronização concluída: nenhum resultado novo.');
-    }
-  } catch (error) {
-    console.error('Erro na sincronização automática:', error.message);
+  if (updated) {
+    const users = await dbGetUsers();
+    const freshMatches = await dbGetMatches();
+    await recalculateScores(freshMatches, users);
+    await dbSaveAllUsers(users);
+    const msg = 'Sincronização concluída: resultados atualizados.';
+    console.log(msg);
+    return { success: true, message: msg, updated: true };
+  } else {
+    const msg = 'Sincronização concluída: nenhum resultado novo.';
+    console.log(msg);
+    return { success: true, message: msg, updated: false };
   }
 }
 
@@ -434,7 +465,7 @@ app.get('/api/data', async (req, res) => {
   const now = Date.now();
   if (now - lastSyncTime > 5 * 60 * 1000) {
     lastSyncTime = now;
-    syncFromWeb();
+    syncFromWeb().catch(err => console.error('Erro na sincronização automática:', err.message));
   }
 
   const matches = await dbGetMatches();
@@ -522,36 +553,45 @@ app.post('/api/predictions', async (req, res) => {
 
 // Admin
 app.post('/api/admin/update-match', async (req, res) => {
-  const { adminPin, matchId, score1, score2 } = req.body;
-  if (adminPin !== '2026') {
-    return res.status(401).json({ error: 'Código administrativo incorreto.' });
+  try {
+    const { adminPin, matchId, score1, score2 } = req.body;
+    if (adminPin !== '2026') {
+      return res.status(401).json({ error: 'Código administrativo incorreto.' });
+    }
+
+    const matches = await dbGetMatches();
+    const match = matches.find(m => m.id === parseInt(matchId, 10));
+
+    if (!match) {
+      return res.status(404).json({ error: 'Partida não encontrada.' });
+    }
+
+    let s1 = null;
+    let s2 = null;
+    let status = 'scheduled';
+
+    if (score1 !== undefined && score2 !== undefined && score1 !== null && score2 !== null && score1 !== '' && score2 !== '') {
+      const p1 = parseInt(score1, 10);
+      const p2 = parseInt(score2, 10);
+      if (!isNaN(p1) && !isNaN(p2)) {
+        s1 = p1;
+        s2 = p2;
+        status = 'completed';
+      }
+    }
+
+    await dbUpdateMatch(match.id, s1, s2, status);
+
+    const freshMatches = await dbGetMatches();
+    const users = await dbGetUsers();
+    await recalculateScores(freshMatches, users);
+    await dbSaveAllUsers(users);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Erro ao atualizar partida:', error);
+    res.status(500).json({ error: `Erro interno ao atualizar partida: ${error.message}` });
   }
-
-  const matches = await dbGetMatches();
-  const match = matches.find(m => m.id === parseInt(matchId, 10));
-
-  if (!match) {
-    return res.status(404).json({ error: 'Partida não encontrada.' });
-  }
-
-  let s1 = null;
-  let s2 = null;
-  let status = 'scheduled';
-
-  if (score1 !== null && score2 !== null && score1 !== '' && score2 !== '') {
-    s1 = parseInt(score1, 10);
-    s2 = parseInt(score2, 10);
-    status = 'completed';
-  }
-
-  await dbUpdateMatch(match.id, s1, s2, status);
-
-  const freshMatches = await dbGetMatches();
-  const users = await dbGetUsers();
-  await recalculateScores(freshMatches, users);
-  await dbSaveAllUsers(users);
-
-  res.json({ success: true });
 });
 
 app.post('/api/admin/sync', async (req, res) => {
@@ -560,8 +600,13 @@ app.post('/api/admin/sync', async (req, res) => {
     return res.status(401).json({ error: 'Código administrativo incorreto.' });
   }
 
-  await syncFromWeb();
-  res.json({ success: true, message: 'Sincronização forçada realizada com sucesso.' });
+  try {
+    const result = await syncFromWeb();
+    res.json({ success: true, message: result.message });
+  } catch (error) {
+    console.error('Erro na sincronização forçada:', error);
+    res.status(500).json({ error: `Erro na sincronização: ${error.message}` });
+  }
 });
 
 app.listen(PORT, () => {
