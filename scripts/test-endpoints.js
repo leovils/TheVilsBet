@@ -35,7 +35,7 @@ async function runTests() {
   // Limpar banco de dados de usuários escrevendo um JSON vazio no users.json
   const fs = require('fs');
   const path = require('path');
-  fs.writeFileSync(path.join(__dirname, '..', 'data', 'users.json'), '{}', 'utf8');
+  fs.writeFileSync(path.join(__dirname, '..', '.data', 'users.json'), '{}', 'utf8');
 
   // Teste 1: Cadastro de Usuário Novo
   console.log('Teste 1: Cadastro de "Andre"');

@@ -1,6 +1,7 @@
 ﻿const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { Client } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,7 +12,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const MATCHES_FILE = path.join(__dirname, '.data', 'matches.json');
 const USERS_FILE = path.join(__dirname, '.data', 'users.json');
 
-// Garantir inicialização dos arquivos
+// Inicialização de arquivos locais (fallback)
 const dataDir = path.dirname(MATCHES_FILE);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
@@ -22,6 +23,71 @@ if (!fs.existsSync(MATCHES_FILE)) {
 if (!fs.existsSync(USERS_FILE)) {
   fs.writeFileSync(USERS_FILE, '{}', 'utf8');
 }
+
+// Configuração do Banco de Dados
+let pgClient = null;
+const usePostgres = !!process.env.DATABASE_URL;
+
+async function initDb() {
+  if (usePostgres) {
+    console.log('Usando banco de dados PostgreSQL...');
+    try {
+      pgClient = new Client({
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false } // Obrigatório para conexões seguras no Render/Neon
+      });
+      await pgClient.connect();
+      
+      // Criar tabelas se não existirem
+      await pgClient.query(`
+        CREATE TABLE IF NOT EXISTS matches (
+          id INT PRIMARY KEY,
+          group_name VARCHAR(50),
+          match_date VARCHAR(20),
+          match_time VARCHAR(20),
+          team1 VARCHAR(100),
+          team2 VARCHAR(100),
+          stadium VARCHAR(200),
+          score1 INT,
+          score2 INT,
+          status VARCHAR(50)
+        );
+        CREATE TABLE IF NOT EXISTS users (
+          username VARCHAR(100) PRIMARY KEY,
+          pin VARCHAR(4),
+          predictions JSONB,
+          score INT DEFAULT 0,
+          exact_scores INT DEFAULT 0,
+          outcome_scores INT DEFAULT 0
+        );
+      `);
+      
+      // Se matches estiver vazio no SQL, popular com dados do matches.json inicial
+      const matchesCheck = await pgClient.query('SELECT count(*) FROM matches');
+      if (parseInt(matchesCheck.rows[0].count, 10) === 0) {
+        console.log('Populando tabela matches do PostgreSQL a partir do matches.json local...');
+        const localMatches = JSON.parse(fs.readFileSync(MATCHES_FILE, 'utf8'));
+        for (let m of localMatches) {
+          await pgClient.query(
+            `INSERT INTO matches (id, group_name, match_date, match_time, team1, team2, stadium, score1, score2, status) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [m.id, m.group, m.date, m.time, m.team1, m.team2, m.stadium, m.score1, m.score2, m.status]
+          );
+        }
+        console.log('Importação do matches.json para SQL finalizada.');
+      }
+    } catch (e) {
+      console.error('Erro ao conectar ou configurar o PostgreSQL:', e.message);
+      console.log('O servidor continuará usando banco de dados em arquivo local como fallback.');
+      pgClient = null;
+    }
+  } else {
+    console.log('Usando banco de dados baseado em arquivos JSON locais...');
+  }
+}
+
+// Inicializar banco no início
+initDb();
 
 // Cache de sincronização automática (throttle de 5 minutos)
 let lastSyncTime = 0;
@@ -50,7 +116,93 @@ function writeUsers(users) {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf8');
 }
 
-// Auxiliar: Converte data/hora do jogo para objeto Date
+// ----------------- IMPLEMENTAÇÃO DE COMPATIBILIDADE DB -----------------
+
+async function dbGetMatches() {
+  if (pgClient) {
+    const res = await pgClient.query('SELECT * FROM matches ORDER BY id ASC');
+    return res.rows.map(m => ({
+      id: m.id,
+      group: m.group_name,
+      date: m.match_date,
+      time: m.match_time,
+      team1: m.team1,
+      team2: m.team2,
+      stadium: m.stadium,
+      score1: m.score1,
+      score2: m.score2,
+      status: m.status
+    }));
+  } else {
+    return readMatches();
+  }
+}
+
+async function dbUpdateMatch(id, score1, score2, status) {
+  if (pgClient) {
+    await pgClient.query(
+      'UPDATE matches SET score1 = $1, score2 = $2, status = $3 WHERE id = $4',
+      [score1, score2, status, id]
+    );
+  } else {
+    const matches = readMatches();
+    const match = matches.find(m => m.id === id);
+    if (match) {
+      match.score1 = score1;
+      match.score2 = score2;
+      match.status = status;
+      writeMatches(matches);
+    }
+  }
+}
+
+async function dbGetUsers() {
+  if (pgClient) {
+    const res = await pgClient.query('SELECT * FROM users');
+    const users = {};
+    res.rows.forEach(u => {
+      users[u.username] = {
+        pin: u.pin,
+        predictions: u.predictions || {},
+        score: u.score || 0,
+        exactScores: u.exact_scores || 0,
+        outcomeScores: u.outcome_scores || 0
+      };
+    });
+    return users;
+  } else {
+    return readUsers();
+  }
+}
+
+async function dbSaveUser(username, userData) {
+  if (pgClient) {
+    await pgClient.query(
+      `INSERT INTO users (username, pin, predictions, score, exact_scores, outcome_scores)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (username) DO UPDATE 
+       SET pin = $2, predictions = $3, score = $4, exact_scores = $5, outcome_scores = $6`,
+      [username, userData.pin, userData.predictions, userData.score, userData.exactScores, userData.outcomeScores]
+    );
+  } else {
+    const users = readUsers();
+    users[username] = userData;
+    writeUsers(users);
+  }
+}
+
+async function dbSaveAllUsers(users) {
+  if (pgClient) {
+    for (let username in users) {
+      await dbSaveUser(username, users[username]);
+    }
+  } else {
+    writeUsers(users);
+  }
+}
+
+// ----------------- AUXILIARES -----------------
+
 function getMatchKickoffTime(match) {
   const parts = match.time.split(/\s+/);
   const timePart = parts[0]; // "13:00"
@@ -68,16 +220,13 @@ function getMatchKickoffTime(match) {
   return new Date(`${match.date}T${timePart}:00${offset}`);
 }
 
-// Auxiliar: Verifica se a aposta está bloqueada (15 minutos antes do início)
 function isMatchLocked(match) {
   const kickoff = getMatchKickoffTime(match);
   const now = new Date();
-  // Bloqueia se faltar menos de 15 minutos (15 * 60 * 1000 ms)
   return now.getTime() >= (kickoff.getTime() - 15 * 60 * 1000);
 }
 
-// Auxiliar: Recalcula a pontuação de todos os usuários
-function recalculateScores(matches, users) {
+async function recalculateScores(matches, users) {
   const matchMap = new Map();
   matches.forEach(m => {
     if (m.score1 !== null && m.score2 !== null) {
@@ -106,16 +255,14 @@ function recalculateScores(matches, users) {
       const a1 = actual.score1;
       const a2 = actual.score2;
 
-      // 1. Placar Exato: 10 moedas
       if (p1 === a1 && p2 === a2) {
         score += 10;
         exactScores += 1;
       }
-      // 2. Acerto do Vencedor ou Empate: 5 moedas
       else if (
-        (a1 > a2 && p1 > p2) ||  // Vitória Mandante
-        (a1 < a2 && p1 < p2) ||  // Vitória Visitante
-        (a1 === a2 && p1 === p2) // Empate
+        (a1 > a2 && p1 > p2) ||
+        (a1 < a2 && p1 < p2) ||
+        (a1 === a2 && p1 === p2)
       ) {
         score += 5;
         outcomeScores += 1;
@@ -128,7 +275,7 @@ function recalculateScores(matches, users) {
   }
 }
 
-// Função para sincronizar dados do openfootball (web)
+// Sincronizar com web
 async function syncFromWeb() {
   try {
     const url = 'https://raw.githubusercontent.com/openfootball/worldcup/master/2026--usa/cup.txt';
@@ -137,18 +284,15 @@ async function syncFromWeb() {
     
     const content = await response.text();
     const lines = content.split(/\r?\n/);
-    const matches = readMatches();
+    const matches = await dbGetMatches();
     let updated = false;
 
-    // Criamos um mapa para busca rápida por times e data
-    // O texto de openfootball pode ter diferenças sutis, então vamos normalizar
     const normalizeName = name => name.trim().toLowerCase()
       .replace(/korea\s+republic|south\s+korea/g, 'korea republic')
       .replace(/ir\s+iran|iran/g, 'ir iran')
       .replace(/cote\s+d\'ivoire|ivory\s+coast/g, 'ivory coast')
       .replace(/czechia|czech\s+republic/g, 'czechia');
 
-    // Mapeamos os jogos locais existentes
     const localMatchMap = new Map();
     matches.forEach(m => {
       const key = `${normalizeName(m.team1)} v ${normalizeName(m.team2)}`;
@@ -179,14 +323,9 @@ async function syncFromWeb() {
       }
 
       if (trimmed.includes(' v ')) {
-        // Formato esperado de linha com placar no cup.txt do openfootball:
-        // ex: "  13:00 UTC-6     Mexico   2-1 South Africa  @ Estadio Azteca"
-        // Ou se não aconteceu: "  13:00 UTC-6     Mexico   v South Africa  @ Estadio Azteca"
         let parts = trimmed.split('@');
         let matchPart = parts[0].trim();
         
-        // Vamos verificar se a linha tem o resultado no formato X-Y
-        // ex: "Mexico   2-1 South Africa"
         const scoreRegex = /^(.*)\s+(\d+)-(\d+)\s+(.*)$/;
         const scoreMatch = matchPart.match(scoreRegex);
 
@@ -196,7 +335,6 @@ async function syncFromWeb() {
         let s2 = null;
 
         if (scoreMatch) {
-          // O time1 pode ter o horário no início, vamos retirar
           let t1Part = scoreMatch[1].trim();
           t1Part = t1Part.replace(/^\d{2}:\d{2}\s+UTC[+-]\d+\s+/, '').trim();
           team1 = t1Part;
@@ -204,7 +342,6 @@ async function syncFromWeb() {
           s2 = parseInt(scoreMatch[3], 10);
           team2 = scoreMatch[4].trim();
         } else {
-          // Sem placar (apenas "v")
           const vSplit = matchPart.split(/\s+v\s+/);
           if (vSplit.length === 2) {
             let t1Part = vSplit[0].trim();
@@ -223,6 +360,7 @@ async function syncFromWeb() {
                 localMatch.score1 = s1;
                 localMatch.score2 = s2;
                 localMatch.status = 'completed';
+                await dbUpdateMatch(localMatch.id, s1, s2, 'completed');
                 updated = true;
               }
             }
@@ -232,10 +370,10 @@ async function syncFromWeb() {
     }
 
     if (updated) {
-      writeMatches(matches);
-      const users = readUsers();
-      recalculateScores(matches, users);
-      writeUsers(users);
+      const users = await dbGetUsers();
+      const freshMatches = await dbGetMatches();
+      await recalculateScores(freshMatches, users);
+      await dbSaveAllUsers(users);
       console.log('Sincronização concluída: resultados atualizados.');
     } else {
       console.log('Sincronização concluída: nenhum resultado novo.');
@@ -247,24 +385,22 @@ async function syncFromWeb() {
 
 // ----------------- ROTAS DA API -----------------
 
-// Rota de Cadastro
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   const { username, pin } = req.body;
   if (!username || !pin || pin.length !== 4 || isNaN(pin)) {
     return res.status(400).json({ error: 'Dados inválidos. Nome e PIN de 4 dígitos são necessários.' });
   }
 
-  const users = readUsers();
+  const users = await dbGetUsers();
   const lowerName = username.trim().toLowerCase();
   
-  // Verificar duplicidade
   for (let key in users) {
     if (key.toLowerCase() === lowerName) {
       return res.status(400).json({ error: 'Este nome já está em uso.' });
     }
   }
 
-  users[username.trim()] = {
+  const newUser = {
     pin: pin,
     predictions: {},
     score: 0,
@@ -272,18 +408,17 @@ app.post('/api/register', (req, res) => {
     outcomeScores: 0
   };
 
-  writeUsers(users);
+  await dbSaveUser(username.trim(), newUser);
   res.json({ success: true, username: username.trim() });
 });
 
-// Rota de Login
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, pin } = req.body;
   if (!username || !pin) {
     return res.status(400).json({ error: 'Nome e PIN são necessários.' });
   }
 
-  const users = readUsers();
+  const users = await dbGetUsers();
   const user = users[username.trim()];
 
   if (!user || user.pin !== pin) {
@@ -293,22 +428,18 @@ app.post('/api/login', (req, res) => {
   res.json({ success: true, username: username.trim() });
 });
 
-// Obter dados do Painel (Jogos e Classificação)
 app.get('/api/data', async (req, res) => {
   const { username } = req.query;
   
-  // Tentar sincronização em segundo plano (cache 5 min)
   const now = Date.now();
   if (now - lastSyncTime > 5 * 60 * 1000) {
     lastSyncTime = now;
-    // Sincroniza sem bloquear a resposta da API
     syncFromWeb();
   }
 
-  const matches = readMatches();
-  const users = readUsers();
+  const matches = await dbGetMatches();
+  const users = await dbGetUsers();
 
-  // 1. Gerar Classificação (Leaderboard)
   const leaderboard = Object.keys(users).map(name => ({
     username: name,
     score: users[name].score || 0,
@@ -320,18 +451,15 @@ app.get('/api/data', async (req, res) => {
     return a.username.localeCompare(b.username);
   });
 
-  // 2. Processar Jogos e Palpites
   const processedMatches = matches.map(match => {
     const isLocked = isMatchLocked(match);
     const predictions = [];
 
-    // Pegar o palpite do usuário logado
     let myPrediction = null;
     if (username && users[username]) {
       myPrediction = users[username].predictions[match.id] || null;
     }
 
-    // Se o jogo já começou (locked), expor os palpites dos demais participantes
     if (isLocked) {
       for (let name in users) {
         const p = users[name].predictions[match.id];
@@ -359,78 +487,73 @@ app.get('/api/data', async (req, res) => {
   });
 });
 
-// Enviar / Atualizar Palpites
-app.post('/api/predictions', (req, res) => {
+app.post('/api/predictions', async (req, res) => {
   const { username, pin, matchId, score1, score2 } = req.body;
   if (!username || !pin || !matchId) {
     return res.status(400).json({ error: 'Dados insuficientes.' });
   }
 
-  const users = readUsers();
+  const users = await dbGetUsers();
   const user = users[username];
 
   if (!user || user.pin !== pin) {
     return res.status(401).json({ error: 'Não autorizado.' });
   }
 
-  const matches = readMatches();
+  const matches = await dbGetMatches();
   const match = matches.find(m => m.id === parseInt(matchId, 10));
 
   if (!match) {
     return res.status(404).json({ error: 'Partida não encontrada.' });
   }
 
-  // Validar se o jogo está trancado
   if (isMatchLocked(match)) {
     return res.status(400).json({ error: 'Apostas encerradas para este jogo (limite de 15 minutos antes do início).' });
   }
 
-  // Registrar palpite
   user.predictions[matchId] = {
     score1: score1 === '' || score1 === null ? null : parseInt(score1, 10),
     score2: score2 === '' || score2 === null ? null : parseInt(score2, 10)
   };
 
-  writeUsers(users);
+  await dbSaveUser(username, user);
   res.json({ success: true });
 });
 
-// ----------------- ROTAS ADMIN -----------------
-
-// Atualizar resultado manualmente
-app.post('/api/admin/update-match', (req, res) => {
+// Admin
+app.post('/api/admin/update-match', async (req, res) => {
   const { adminPin, matchId, score1, score2 } = req.body;
   if (adminPin !== '2026') {
     return res.status(401).json({ error: 'Código administrativo incorreto.' });
   }
 
-  const matches = readMatches();
+  const matches = await dbGetMatches();
   const match = matches.find(m => m.id === parseInt(matchId, 10));
 
   if (!match) {
     return res.status(404).json({ error: 'Partida não encontrada.' });
   }
 
-  if (score1 === null || score2 === null || score1 === '' || score2 === '') {
-    match.score1 = null;
-    match.score2 = null;
-    match.status = 'scheduled';
-  } else {
-    match.score1 = parseInt(score1, 10);
-    match.score2 = parseInt(score2, 10);
-    match.status = 'completed';
+  let s1 = null;
+  let s2 = null;
+  let status = 'scheduled';
+
+  if (score1 !== null && score2 !== null && score1 !== '' && score2 !== '') {
+    s1 = parseInt(score1, 10);
+    s2 = parseInt(score2, 10);
+    status = 'completed';
   }
 
-  writeMatches(matches);
+  await dbUpdateMatch(match.id, s1, s2, status);
 
-  const users = readUsers();
-  recalculateScores(matches, users);
-  writeUsers(users);
+  const freshMatches = await dbGetMatches();
+  const users = await dbGetUsers();
+  await recalculateScores(freshMatches, users);
+  await dbSaveAllUsers(users);
 
   res.json({ success: true });
 });
 
-// Forçar sincronização
 app.post('/api/admin/sync', async (req, res) => {
   const { adminPin } = req.body;
   if (adminPin !== '2026') {
@@ -438,7 +561,6 @@ app.post('/api/admin/sync', async (req, res) => {
   }
 
   await syncFromWeb();
-  
   res.json({ success: true, message: 'Sincronização forçada realizada com sucesso.' });
 });
 
